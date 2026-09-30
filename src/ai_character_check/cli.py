@@ -14,13 +14,15 @@ from contextlib import contextmanager
 
 from . import __version__
 from .blender import (NOT_FOUND_MESSAGE, BlenderFailed, convert_to_glb, find_blender, render)
-from .checks import run_checks
-from .gltf_io import LoadError, load_model
+from .checks import blocked_report, run_checks
+from .gltf_io import ExternalResourceBlocked, LoadError, load_model
 from .humanoid import build_map
 from .output import to_html, to_json, to_text
 from .profiles import PROFILES
 
 NEEDS_BLENDER = (".fbx",)
+ALLOW_HELP = ("also read buffers and textures from local paths outside the model's folder "
+              "(network paths and URLs stay blocked); only for files you trust")
 
 
 class CliError(Exception):
@@ -28,11 +30,12 @@ class CliError(Exception):
 
 
 @contextmanager
-def as_gltf(path: str, blender_arg: str | None):
-    """Yield (gltf_path, note). FBX input is converted with Blender into a temp dir."""
+def as_gltf(path: str, blender_arg: str | None, allow_external: bool = False):
+    """Yield (gltf_path, note, blocked). FBX input is converted with Blender into a temp dir;
+    blocked lists FBX texture paths that the guarded importer refused to read."""
     ext = os.path.splitext(path)[1].lower()
     if ext not in NEEDS_BLENDER:
-        yield path, None
+        yield path, None, []
         return
     blender = find_blender(blender_arg)
     if blender is None:
@@ -40,24 +43,15 @@ def as_gltf(path: str, blender_arg: str | None):
     with tempfile.TemporaryDirectory(prefix="aicc-") as tmp:
         dst = os.path.join(tmp, "converted.glb")
         try:
-            version = convert_to_glb(path, dst, blender)
+            version, blocked = convert_to_glb(path, dst, blender, allow_external=allow_external)
         except BlenderFailed as exc:
             raise CliError(f"FBX conversion failed: {exc}") from exc
         note = (f"converted from {ext[1:].upper()} with Blender {version}; scale, axis and bone findings reflect "
                 "Blender's importer and glTF exporter")
-        yield dst, note
+        yield dst, note, blocked
 
 
-def cmd_check(a) -> int:
-    try:
-        with as_gltf(a.model, a.blender) as (gpath, note):
-            model = load_model(gpath)
-            model.source_note = note
-            rep = run_checks(model, a.profile, display_name=os.path.basename(a.model) if a.relative_name
-                             else os.path.abspath(a.model))
-    except (LoadError, CliError) as exc:
-        print(f"aicc: {exc}", file=sys.stderr)
-        return 2
+def _write_report(rep, a) -> int:
     if a.format == "json":
         out = to_json(rep) + "\n"
     elif a.format == "html":
@@ -76,19 +70,47 @@ def cmd_check(a) -> int:
     return 0
 
 
+def cmd_check(a) -> int:
+    display = os.path.basename(a.model) if a.relative_name else os.path.abspath(a.model)
+    try:
+        with as_gltf(a.model, a.blender, a.allow_external_resources) as (gpath, note, fbx_blocked):
+            model = load_model(gpath, allow_external=a.allow_external_resources)
+            model.source_note = note
+            model.blocked_resources.extend(fbx_blocked)
+            rep = run_checks(model, a.profile, display_name=display)
+    except ExternalResourceBlocked as exc:
+        # The geometry lives in a blocked buffer: report the block and check nothing else.
+        rep = blocked_report(exc.blocked, a.profile, display)
+    except (LoadError, CliError) as exc:
+        print(f"aicc: {exc}", file=sys.stderr)
+        return 2
+    return _write_report(rep, a)
+
+
 def cmd_render(a) -> int:
     blender = find_blender(a.blender)
     if blender is None:
         print(f"aicc: cannot render. {NOT_FOUND_MESSAGE}", file=sys.stderr)
         return 2
     try:
-        with as_gltf(a.model, a.blender) as (gpath, _note):
-            model = load_model(gpath)
+        with as_gltf(a.model, a.blender, a.allow_external_resources) as (gpath, _note, fbx_blocked):
+            model = load_model(gpath, allow_external=a.allow_external_resources)
+            if model.blocked_resources:
+                # Blender's glTF importer would read these paths itself, so do not start it.
+                b = model.blocked_resources[0]
+                raise CliError(f"refusing to render: {len(model.blocked_resources)} resource path(s) point "
+                               f"outside the model folder or to the network, first: {b['kind']} {b['index']} "
+                               f"{b['uri']} ({b['reason']}). Run 'aicc check' for details.")
+            for b in fbx_blocked:
+                print(f"note: texture not loaded, path outside the model folder: {b['uri']} ({b['reason']})")
             hm = build_map(model)
             hands = {s: model.node_names[hm.role(f"{s}_hand")] for s in ("left", "right")
                      if hm.role(f"{s}_hand") is not None}
             clip = model.animations[0].name if model.animations else None
             manifest = render(gpath, a.out, blender, hands, clip, size=a.size, frames=a.frames)
+    except ExternalResourceBlocked as exc:
+        print(f"aicc: refusing to render: {exc}. Run 'aicc check' for details.", file=sys.stderr)
+        return 2
     except (LoadError, CliError, BlenderFailed) as exc:
         print(f"aicc: {exc}", file=sys.stderr)
         return 2
@@ -117,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--blender", help="Blender executable (for FBX input); default: $BLENDER, PATH, standard folders")
     c.add_argument("--verbose", "-v", action="store_true", help="text format: show info findings and explanations")
     c.add_argument("--relative-name", action="store_true", help="report only the file name, not the full path")
+    c.add_argument("--allow-external-resources", action="store_true", help=ALLOW_HELP)
     c.set_defaults(func=cmd_check)
 
     r = sub.add_parser("render", help="render front view, both hands and an animation strip with Blender")
@@ -125,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--blender", help="Blender executable; default: $BLENDER, PATH, standard folders")
     r.add_argument("--size", type=int, default=512, help="image size in pixels (square)")
     r.add_argument("--frames", type=int, default=6, help="frames in the animation strip")
+    r.add_argument("--allow-external-resources", action="store_true", help=ALLOW_HELP)
     r.set_defaults(func=cmd_render)
     return p
 

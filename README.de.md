@@ -110,6 +110,7 @@ Die Befunde selbst sind auf Englisch, damit Agenten und Skripte mit festen Texte
 | Massstab | `scale.*` | Höhe des geskinnten Meshs in Metern in der gespeicherten Pose (Fehler ausserhalb 0,3 bis 3,0 m, Warnung ausserhalb 1,2 bis 2,2 m), Hochachse aus Kopf- und Fussknochen, tiefster Punkt gegenüber 0, Skalierung ungleich 1 auf Skelettknoten. |
 | Animation | `animation.*` | Pro Clip: NaN- oder unendliche Schlüssel, Zeiten, die nicht ansteigen, Ziele ausserhalb der Datei oder ausserhalb des Skeletts, Skalierungsschlüssel weit weg von 1, nicht normierte Quaternionen, Root Motion (waagrechte Hüftverschiebung über 10 % der Höhe), Cliplänge. |
 | Texturen | `textures.*` | Fehlende oder unlesbare Bilder, kaputte Textur- und Materialverweise, Grössen, die keine Zweierpotenz sind, Anzahl Bilder und grösste Seitenlänge. |
+| Ressourcen | `resource.external_path_blocked` | Buffer, Bilder und FBX-Texturen, deren Pfad aus dem Ordner des Modells hinaus oder ins Netzwerk zeigt. Sie werden nicht gelesen; siehe [Sicherheit](#sicherheit). |
 
 Profile: `game` (Standard) ist streng bei Einflüssen, Fingern und Zehen, Texturgrössen und Skalierungsschlüsseln. `preview` stuft diese Punkte für Figuren, die nur angeschaut werden, auf Info oder Warnung herunter.
 
@@ -158,6 +159,21 @@ Als feste Sperre in Claude Code kann ein `Stop`-Hook das Beenden verweigern, sol
 
 Exitcode 2 aus einem Stop-Hook lässt Claude weiterarbeiten und gibt den Bericht über stderr an Claude zurück. Lässt sich ein Befund nicht beheben, blockiert der Hook weiter; dann bewusst `--profile preview` setzen oder den Hook entfernen.
 
+## Sicherheit
+
+Eine Modelldatei kann andere Dateien nennen: in glTF `buffers[].uri` und `images[].uri`, in FBX die Pfade der Texturen. `aicc` läuft womöglich auf Downloads, denen man nicht traut. Deshalb liest es ohne weitere Angabe nur
+
+- `data:`-URIs und Daten, die in einer GLB eingebettet sind, und
+- relative Pfade, die im Ordner des Modells bleiben, nachdem Prozentkodierung aufgelöst, `..` ausgewertet und symbolischen Links und Junctions gefolgt wurde.
+
+Alles andere wird nicht geöffnet und als `resource.external_path_blocked` mit Schweregrad error gemeldet: Pfade, die aus dem Ordner hinaufsteigen, absolute Pfade, `file:`, `http:` und andere URI-Schemata, UNC- und andere Netzwerkpfade (`\\server\share\x.bin`, `//server/share/x.bin`), Geräte- und laufwerksrelative Pfade unter Windows sowie Links, die aus dem Ordner hinausführen. Netzwerkpfade sind vor allem unter Windows heikel: Schon die Frage, ob `\\server\share\x.bin` existiert, kann die Windows-Anmeldedaten (NTLM) an diesen Server schicken. Entschieden wird anhand des Pfadtexts und lokaler Abfragen von Links, bevor irgendein Dateisystemaufruf das Ziel berührt.
+
+Ist ein Buffer gesperrt, lässt sich die Geometrie nicht laden, und der Bericht enthält nur diesen Befund. Ein gesperrtes Bild wird einmal gemeldet und nicht zusätzlich als fehlende Textur.
+
+Bei FBX ersetzt das Umwandlungsskript während des Imports den Bildlader von Blender. Texturpfade laufen durch dieselbe Prüfung; eine gesperrte Textur wird zu einem leeren Platzhalter, im FBX eingebettete Texturen werden trotzdem geladen. Wird ein Pfad abgelehnt, liegt aber eine Datei mit demselben Namen neben der FBX-Datei, wird diese genommen (FBX-Dateien tragen oft den absoluten Pfad vom Rechner der Person, die sie erstellt hat). `aicc render` startet Blender nicht für eine glTF-Datei mit gesperrten Pfaden, weil der glTF-Import von Blender sie selbst öffnen würde.
+
+`--allow-external-resources` (bei `check` und `render`) erlaubt zusätzlich lokale Pfade ausserhalb des Ordners, etwa einen gemeinsamen Ordner `../textures/`. Netzwerkpfade, Gerätepfade und URI-Schemata ausser `data:` bleiben gesperrt. Die Option nur für vertrauenswürdige Dateien verwenden. Zwei Fälle erkennt die Prüfung nicht: Ein Laufwerksbuchstabe, der auf eine Netzwerkfreigabe zeigt (`Z:\`), gilt als lokal, und die Modelldatei, die man auf der Kommandozeile angibt, wird so geöffnet, wie sie genannt ist, auch auf einer Netzwerkfreigabe.
+
 ## Grenzen
 
 - Die Rollen der Knochen kommen aus den Namen. Ein Rig mit Namen wie `Bone.001` bekommt `skeleton.not_humanoid`, und die Prüfungen für Finger, Zehen, Pose und Körperseiten entfallen. Eine Erkennung aus der Geometrie gibt es noch nicht.
@@ -178,7 +194,7 @@ pip install -e ".[test]"
 pytest
 ```
 
-Die beiden Blender-Tests laufen nur, wenn Blender gefunden wird, sonst werden sie übersprungen.
+Die vier Blender-Tests laufen nur, wenn Blender gefunden wird, sonst werden sie übersprungen.
 
 ## Lizenz
 

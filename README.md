@@ -110,6 +110,7 @@ The JSON report has this shape (shortened):
 | Scale | `scale.*` | Height in metres of the skinned mesh in the stored pose (error outside 0.3 to 3.0 m, warning outside 1.2 to 2.2 m), up axis from head and feet bones, lowest point relative to 0, non-unit scale on skeleton nodes. |
 | Animation | `animation.*` | Per clip: NaN or infinite keys, key times that do not increase, targets outside the file or outside the skeleton, scale keys far from 1, non-unit quaternions, root motion (horizontal hip displacement above 10 % of the height), clip length. |
 | Textures | `textures.*` | Missing or unreadable images, broken texture and material references, non-power-of-two sizes, image count and largest side. |
+| Resources | `resource.external_path_blocked` | Buffers, images and FBX textures whose path points outside the model's folder or to the network. They are not read; see [Security](#security). |
 
 Profiles: `game` (default) is strict about influences, finger and toe completeness, texture sizes and animation scale keys. `preview` downgrades those to info or warning for characters that are only viewed.
 
@@ -158,6 +159,21 @@ To make it a hard gate in Claude Code, a `Stop` hook can refuse to finish while 
 
 Exit code 2 from a Stop hook keeps Claude working and passes the report on stderr back to it. If a finding cannot be fixed, the hook keeps blocking; use `--profile preview` or `--fail-on error` deliberately, or remove the hook.
 
+## Security
+
+A model file can name other files: glTF `buffers[].uri` and `images[].uri`, and texture paths in FBX. `aicc` may run on downloads you do not trust, so by default it reads only
+
+- `data:` URIs and data embedded in a GLB, and
+- relative paths that stay inside the model's own folder after percent-decoding, resolving `..`, and following symbolic links and junctions.
+
+Everything else is not opened and is reported as `resource.external_path_blocked` with severity error: paths that climb out of the folder, absolute paths, `file:`, `http:` and other URI schemes, UNC and other network paths (`\\server\share\x.bin`, `//server/share/x.bin`), Windows device and drive-relative paths, and links that lead out of the folder. Network paths matter most on Windows, where even asking whether `\\server\share\x.bin` exists can send your login credentials (NTLM) to that server. The decision is made on the path text and on local link lookups, before any file system call touches the target.
+
+If a buffer is blocked, the geometry cannot be loaded and the report contains only this finding. A blocked image is reported once, not also as a missing texture.
+
+For FBX input the conversion script replaces Blender's image loader during the import. Texture paths go through the same check; a blocked texture becomes an empty placeholder, and textures embedded in the FBX still load. When the path is refused but a file with the same name lies next to the FBX, that file is used (FBX files often carry the absolute path from the author's machine). `aicc render` does not start Blender on a glTF with blocked paths, because Blender's glTF importer would open them itself.
+
+`--allow-external-resources` (for `check` and `render`) also allows local paths outside the folder, for example a shared `../textures/` folder. Network paths, device paths and URI schemes other than `data:` stay blocked. Use it only for files you trust. Two cases the check cannot see: a drive letter mapped to a network share (`Z:\`) counts as local, and the model file you name on the command line is opened as given, even on a network share.
+
 ## Limitations
 
 - Bone roles come from names. A rig with generic names (`Bone.001`) gets `skeleton.not_humanoid` and the finger, toe, pose and side checks are skipped. There is no geometric bone detection yet.
@@ -178,7 +194,7 @@ pip install -e ".[test]"
 pytest
 ```
 
-The two Blender tests run only when Blender is found and are skipped otherwise.
+The four Blender tests run only when Blender is found and are skipped otherwise.
 
 ## License
 

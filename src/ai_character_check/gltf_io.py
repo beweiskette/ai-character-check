@@ -11,16 +11,27 @@ from __future__ import annotations
 import base64
 import os
 import struct
-import urllib.parse
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 import pygltflib
 
+from . import safe_paths
+
 
 class LoadError(Exception):
     """Raised when a file cannot be read as glTF at all."""
+
+
+class ExternalResourceBlocked(LoadError):
+    """A buffer points outside the model folder or to the network; nothing was read from it."""
+
+    def __init__(self, blocked: list[dict]):
+        self.blocked = blocked
+        first = blocked[0]
+        super().__init__(f"{first['kind']} {first['index']} points outside the model folder "
+                         f"({first['reason']}): {first['uri']}")
 
 
 COMPONENT_DTYPES = {
@@ -101,6 +112,7 @@ class ImageInfo:
     missing_reason: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    blocked: bool = False
 
 
 @dataclass
@@ -118,6 +130,8 @@ class Model:
     images: list[ImageInfo]
     issues: list[str] = field(default_factory=list)
     source_note: Optional[str] = None
+    # Resources that were not read because they point outside the model folder or to the network.
+    blocked_resources: list[dict] = field(default_factory=list)
 
     @property
     def joint_nodes(self) -> list[int]:
@@ -175,10 +189,35 @@ def node_local_matrix(node: pygltflib.Node) -> np.ndarray:
 # Buffer / accessor access
 
 
+def _blocked_entry(kind: str, index: int, uri: str, reason: str) -> dict:
+    return {"kind": kind, "index": index, "uri": uri if len(uri) <= 200 else uri[:197] + "...", "reason": reason}
+
+
+def scan_resources(gltf: pygltflib.GLTF2, base_dir: str, allow_external: bool = False):
+    """Check every external buffer and image URI before anything is read.
+
+    Returns ({(kind, index): path}, [blocked entries]). data: URIs are not listed.
+    """
+    allowed: dict[tuple[str, int], str] = {}
+    blocked: list[dict] = []
+    for kind, items in (("buffer", gltf.buffers or []), ("image", gltf.images or [])):
+        for i, item in enumerate(items):
+            uri = item.uri
+            if not uri or (isinstance(uri, str) and uri.startswith("data:")):
+                continue
+            path, reason = safe_paths.check_uri(uri, base_dir, allow_external)
+            if path is None:
+                blocked.append(_blocked_entry(kind, i, str(uri), reason))
+            else:
+                allowed[(kind, i)] = path
+    return allowed, blocked
+
+
 class _Reader:
-    def __init__(self, gltf: pygltflib.GLTF2, base_dir: str):
+    def __init__(self, gltf: pygltflib.GLTF2, base_dir: str, paths: dict[tuple[str, int], str]):
         self.gltf = gltf
         self.base_dir = base_dir
+        self.paths = paths
         self._buffers: dict[int, bytes] = {}
 
     def buffer(self, index: int) -> bytes:
@@ -186,7 +225,7 @@ class _Reader:
             return self._buffers[index]
         buf = self.gltf.buffers[index]
         uri = buf.uri
-        if uri is None:
+        if not uri:
             data = self.gltf.binary_blob()
             if data is None:
                 raise LoadError(f"buffer {index} has no uri and the file has no binary chunk")
@@ -196,7 +235,9 @@ class _Reader:
             except Exception as exc:  # noqa: BLE001
                 raise LoadError(f"buffer {index}: invalid data uri ({exc})") from exc
         else:
-            path = os.path.join(self.base_dir, urllib.parse.unquote(uri))
+            path = self.paths.get(("buffer", index))
+            if path is None:  # scan_resources blocked it; load_model stops before this
+                raise LoadError(f"buffer {index}: external path blocked: {uri}")
             if not os.path.isfile(path):
                 raise LoadError(f"buffer {index}: external file not found: {uri}")
             with open(path, "rb") as fh:
@@ -305,7 +346,9 @@ def skin_points(points: np.ndarray, joints: np.ndarray, weights: np.ndarray,
     return out
 
 
-def load_model(path: str) -> Model:
+def load_model(path: str, allow_external: bool = False) -> Model:
+    """Load path. External buffers and images are read only from inside the model's folder
+    (plus local paths outside it when allow_external is set); see safe_paths."""
     if not os.path.isfile(path):
         raise LoadError(f"file not found: {path}")
     try:
@@ -318,7 +361,12 @@ def load_model(path: str) -> Model:
     if unsupported:
         raise LoadError(f"compressed geometry is not supported ({', '.join(unsupported)}); re-export the file "
                         "without mesh compression (for example from Blender)")
-    reader = _Reader(gltf, os.path.dirname(os.path.abspath(path)))
+    base_dir = os.path.dirname(os.path.abspath(path))
+    resource_paths, blocked = scan_resources(gltf, base_dir, allow_external)
+    if any(b["kind"] == "buffer" for b in blocked):
+        raise ExternalResourceBlocked(blocked)
+    blocked_images = {b["index"]: b for b in blocked if b["kind"] == "image"}
+    reader = _Reader(gltf, base_dir, resource_paths)
     issues: list[str] = []
 
     nodes = gltf.nodes or []
@@ -435,6 +483,11 @@ def load_model(path: str) -> Model:
     images: list[ImageInfo] = []
     for ii, im in enumerate(gltf.images or []):
         info = ImageInfo(ii, im.name or f"image_{ii}", im.uri, im.mimeType, None)
+        if ii in blocked_images:
+            info.blocked = True
+            info.missing_reason = f"external path blocked ({blocked_images[ii]['reason']})"
+            images.append(info)
+            continue
         try:
             if im.bufferView is not None:
                 info.data = reader.view_bytes(im.bufferView)
@@ -442,7 +495,7 @@ def load_model(path: str) -> Model:
                 if im.uri.startswith("data:"):
                     info.data = base64.b64decode(im.uri.split(",", 1)[1])
                 else:
-                    p = os.path.join(reader.base_dir, urllib.parse.unquote(im.uri))
+                    p = resource_paths[("image", ii)]
                     if os.path.isfile(p):
                         with open(p, "rb") as fh:
                             info.data = fh.read()
@@ -461,7 +514,7 @@ def load_model(path: str) -> Model:
         images.append(info)
 
     return Model(os.path.abspath(path), gltf, names, parents, children, local, world, skins,
-                 prims, anims, images, issues)
+                 prims, anims, images, issues, blocked_resources=blocked)
 
 
 # --------------------------------------------------------------------------

@@ -40,7 +40,7 @@ def check_textures(ctx: Context, rep: Report) -> None:
     textures = g.textures or []
     missing = []
     for im in images:
-        if im.missing_reason:
+        if im.missing_reason and not im.blocked:  # blocked paths have their own finding
             missing.append({"image": im.name, "reason": im.missing_reason})
     for ti, tex in enumerate(textures):
         src = _texture_source(tex)

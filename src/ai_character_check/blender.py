@@ -77,13 +77,26 @@ def run_script(blender: str, script: str, script_args: list[str], timeout: int =
     return proc
 
 
-def convert_to_glb(src: str, dst: str, blender: str) -> str:
-    """Convert src (FBX) to dst (GLB). Returns the Blender version string."""
-    proc = run_script(blender, script_path("convert_to_glb.py"), [os.path.abspath(src), os.path.abspath(dst)])
+def convert_to_glb(src: str, dst: str, blender: str, allow_external: bool = False) -> tuple[str, list[dict]]:
+    """Convert src (FBX) to dst (GLB).
+
+    Texture paths in the FBX are read only from inside the FBX's folder (see
+    safe_paths); with allow_external also from other local paths.
+    Returns (Blender version string, blocked texture entries).
+    """
+    args = [os.path.abspath(src), os.path.abspath(dst), "allow-external" if allow_external else "confine"]
+    proc = run_script(blender, script_path("convert_to_glb.py"), args)
     if not os.path.isfile(dst):
         raise BlenderFailed("Blender finished but wrote no GLB file")
     m = re.search(r"AICC_BLENDER_VERSION (\S+)", proc.stdout)
-    return m.group(1) if m else "unknown"
+    blocked = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("AICC_BLOCKED "):
+            try:
+                blocked.append(json.loads(line[len("AICC_BLOCKED "):]))
+            except ValueError:
+                pass
+    return (m.group(1) if m else "unknown"), blocked
 
 
 def render(glb: str, out_dir: str, blender: str, hands: dict, clip: Optional[str], size: int = 512,
