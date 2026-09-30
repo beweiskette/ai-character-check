@@ -13,7 +13,7 @@ Other tools cover parts of this. Animation linters look at clips only, and gener
 The package is not on PyPI yet. Install from a clone:
 
 ```bash
-git clone <repository-url> ai-character-check
+git clone https://github.com/beweiskette/ai-character-check.git
 cd ai-character-check
 python -m venv .venv
 .venv/bin/pip install -e .          # Windows: .venv\Scripts\pip install -e .

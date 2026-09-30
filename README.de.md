@@ -13,7 +13,7 @@ Andere Werkzeuge decken Teile davon ab. Animations-Linter prüfen nur Clips, all
 Das Paket ist noch nicht auf PyPI. Installation aus einem Klon:
 
 ```bash
-git clone <repository-url> ai-character-check
+git clone https://github.com/beweiskette/ai-character-check.git
 cd ai-character-check
 python -m venv .venv
 .venv/bin/pip install -e .          # Windows: .venv\Scripts\pip install -e .
