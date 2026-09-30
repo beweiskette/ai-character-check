@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-character-check"
+version = "0.1.0"
+description = "Checks AI-generated and auto-rigged 3D characters (glTF/GLB, FBX via Blender) before they go into a game engine."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "pygltflib>=1.16",
+]
+keywords = ["gltf", "glb", "rigging", "skinning", "character", "validation", "game-dev"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+aicc = "ai_character_check.cli:main"
+ai-character-check = "ai_character_check.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai_character_check = ["blender_scripts/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
